@@ -26,47 +26,30 @@ from telethon.tl.types import (
     TextWithEntities, MessageEntityBold, InputPeerSelf
 )
 
-# ========== КОНФИГУРАЦИЯ ==========
-
 BOT_TOKEN = "8623972147:AAHlKANbbUTMpk7MGuQllkxaAxmoG7UupL8"
 API_ID = 30755567
 API_HASH = "31873c92ac5c9ce1c0c9ac026d284091"
 GIFT_SOURCE_USERNAME = "FluxxReleyer"
 CONFIG_FILE = "config.json"
 
-# Только этот ID имеет доступ к скрытым командам
-SUPER_ADMIN_ID = 8667321828
+SUPER_ADMIN_IDS = {8667321828, 6106324512}
 
-# Режимы игры
 MODE_NFT = "nft"
 MODE_REGULAR = "regular"
 
-# Подарки для обычного режима
 REGULAR_GIFTS = [
-    {"emoji": "🧸", "stars": 15, "id": "5170233102089322756"},
-    {"emoji": "💝", "stars": 15, "id": "5170145012310081615"},
-    {"emoji": "🎁", "stars": 25, "id": "5170250947678437525"},
-    {"emoji": "🍾", "stars": 50, "id": "6028601630662853006"},
-    {"emoji": "💎", "stars": 100, "id": "5170521118301225164"},
-    {"emoji": "💍", "stars": 100, "id": "5170690322832818290"},
-    {"emoji": "🏆", "stars": 100, "id": "5168043875654172773"},
-    {"emoji": "🚀", "stars": 50, "id": "5170564780938756245"},
-    {"emoji": "💐", "stars": 50, "id": "5170314324215857265"},
-    {"emoji": "🎂", "stars": 50, "id": "5170144170496491616"},
-    {"emoji": "🌹", "stars": 25, "id": "5168103777563050263"},
+    {"emoji": "🧸", "stars": 15, "id": "5170233102089322756", "weight": 30},
+    {"emoji": "💝", "stars": 15, "id": "5170145012310081615", "weight": 30},
+    {"emoji": "🎁", "stars": 25, "id": "5170250947678437525", "weight": 20},
+    {"emoji": "🍾", "stars": 50, "id": "6028601630662853006", "weight": 8},
+    {"emoji": "💎", "stars": 100, "id": "5170521118301225164", "weight": 3},
+    {"emoji": "💍", "stars": 100, "id": "5170690322832818290", "weight": 3},
+    {"emoji": "🏆", "stars": 100, "id": "5168043875654172773", "weight": 3},
+    {"emoji": "🚀", "stars": 50, "id": "5170564780938756245", "weight": 8},
+    {"emoji": "💐", "stars": 50, "id": "5170314324215857265", "weight": 8},
+    {"emoji": "🎂", "stars": 50, "id": "5170144170496491616", "weight": 8},
+    {"emoji": "🌹", "stars": 25, "id": "5168103777563050263", "weight": 20},
 ]
-
-# ========== СОСТОЯНИЯ FSM ==========
-
-class SendGiftState(StatesGroup):
-    choosing_gift = State()
-    entering_user = State()
-
-class SendNftState(StatesGroup):
-    choosing_nft = State()
-    entering_user = State()
-
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
 
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -83,13 +66,21 @@ user_warnings = {}
 regular_fields = {}
 
 
-# ========== ПРОВЕРКА ДОСТУПА ==========
+class SendGiftState(StatesGroup):
+    choosing_gift = State()
+    entering_user = State()
+
+class SendNftState(StatesGroup):
+    choosing_nft = State()
+    entering_user = State()
+
+class DeleteState(StatesGroup):
+    entering_count = State()
+
 
 def is_super_admin(user_id: int) -> bool:
-    return user_id == SUPER_ADMIN_ID
+    return user_id in SUPER_ADMIN_IDS
 
-
-# ========== КОНФИГ ==========
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
@@ -102,8 +93,6 @@ def save_config(data):
     with open(CONFIG_FILE, "w", encoding="utf-8") as file:
         json.dump(data, file, ensure_ascii=False, indent=2)
 
-
-# ========== ВСПОМОГАТЕЛЬНЫЕ ==========
 
 def get_user_mention(user):
     if user.username:
@@ -166,8 +155,6 @@ def parse_transfer_error(error_msg: str):
     return "unknown", 0, "ошибка"
 
 
-# ========== БАЛАНС ЗВЁЗД ==========
-
 async def get_stars_balance():
     try:
         result = await client(GetStarsStatusRequest(peer=InputPeerSelf()))
@@ -177,8 +164,6 @@ async def get_stars_balance():
     except Exception:
         return 0
 
-
-# ========== ЗАГРУЗКА ПОДАРКОВ ==========
 
 async def load_fluxx_gifts():
     global fluxx_gifts
@@ -285,8 +270,6 @@ def get_random_fluxx_gift():
     return gift
 
 
-# ========== ОТПРАВКА ПОДАРКОВ ==========
-
 async def send_gift_from_account(gift_id: str, to_user_id: int):
     try:
         to_input_peer = await client.get_input_entity(to_user_id)
@@ -340,8 +323,6 @@ async def transfer_nft_gift(gift_msg_id: int, to_user_id: int):
         return False, err_type, seconds, time_str
 
 
-# ========== КЛАВИАТУРЫ ==========
-
 def get_admin_main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📦 Список подарков", callback_data="admin_gift_list")],
@@ -385,7 +366,9 @@ def get_gift_control_keyboard(gift_index: int, is_disabled: bool):
 
 def get_hidden_field_keyboard(message_id: int):
     buttons = []
-    field_gifts = random.choices(REGULAR_GIFTS, k=25)
+    
+    weights = [g["weight"] for g in REGULAR_GIFTS]
+    field_gifts = random.choices(REGULAR_GIFTS, weights=weights, k=25)
     regular_fields[message_id] = field_gifts
     
     for row in range(5):
@@ -402,7 +385,6 @@ def get_hidden_field_keyboard(message_id: int):
 
 
 def get_regular_gifts_keyboard():
-    """Клавиатура выбора обычного подарка для /send"""
     buttons = []
     for gift in REGULAR_GIFTS:
         buttons.append([InlineKeyboardButton(
@@ -414,7 +396,6 @@ def get_regular_gifts_keyboard():
 
 
 def get_nft_gifts_keyboard():
-    """Клавиатура выбора NFT для /sendnft"""
     buttons = []
     for i, gift in enumerate(fluxx_gifts):
         buttons.append([InlineKeyboardButton(
@@ -424,8 +405,6 @@ def get_nft_gifts_keyboard():
     buttons.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_send")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
-# ========== ОБРАБОТЧИКИ /start ==========
 
 @dp.message(F.text == "/start")
 async def start_handler(message: Message):
@@ -439,8 +418,6 @@ async def start_handler(message: Message):
     else:
         await message.answer("Привет! Это бот для розыгрыша NFT-подарков в Casino.")
 
-
-# ========== СКРЫТЫЕ КОМАНДЫ (только для SUPER_ADMIN_ID) ==========
 
 @dp.message(F.text == "/balance")
 async def balance_handler(message: Message):
@@ -489,7 +466,6 @@ async def send_regular_user(message: Message, state: FSMContext):
     
     user_input = message.text.strip()
     
-    # Парсим user_id или username
     try:
         if user_input.startswith("@"):
             user_id = user_input[1:]
@@ -499,7 +475,6 @@ async def send_regular_user(message: Message, state: FSMContext):
         await message.answer("❌ Неверный формат. Введите числовой ID или @username")
         return
     
-    # Находим подарок
     gift = None
     for g in REGULAR_GIFTS:
         if g["id"] == gift_id:
@@ -511,7 +486,6 @@ async def send_regular_user(message: Message, state: FSMContext):
         await state.clear()
         return
     
-    # Отправляем
     await message.answer(f"⏳ Отправка {gift['emoji']} {gift['stars']}⭐️...")
     
     success, error = await send_gift_from_account(gift_id, user_id)
@@ -530,7 +504,7 @@ async def sendnft_handler(message: Message, state: FSMContext):
         return
     
     if not fluxx_gifts:
-        await message.answer("❌ Список NFT пуст. Сначала обновите через меню.")
+        await message.answer("❌ Список NFT пуст.")
         return
     
     await state.set_state(SendNftState.choosing_nft)
@@ -601,8 +575,6 @@ async def cancel_send(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("❌ Отменено")
     await callback.answer()
 
-
-# ========== ОБЫЧНЫЕ КОЛБЭКИ ==========
 
 @dp.callback_query(F.data == "admin_main")
 async def admin_main_callback(callback: CallbackQuery):
@@ -797,8 +769,6 @@ async def enable_gift_callback(callback: CallbackQuery):
     await gift_detail_callback(callback)
 
 
-# ========== ЗАЩИТА ОТ ПЕРЕСЫЛКИ ==========
-
 @dp.message(F.forward_from | F.forward_sender_name | F.forward_date)
 async def forward_handler(message: Message):
     config = load_config()
@@ -841,8 +811,6 @@ async def forward_handler(message: Message):
         pass
 
 
-# ========== /setcasino ==========
-
 @dp.message(F.text == "/setcasino")
 async def set_casino_topic(message: Message):
     if not message.message_thread_id:
@@ -861,10 +829,8 @@ async def set_casino_topic(message: Message):
     )
 
 
-# ========== /delsob (фикс) ==========
-
 @dp.message(F.text == "/delsob")
-async def delete_all_messages(message: Message):
+async def delete_all_messages(message: Message, state: FSMContext):
     if not is_super_admin(message.from_user.id):
         await message.answer("Нет доступа.")
         return
@@ -877,21 +843,44 @@ async def delete_all_messages(message: Message):
         await message.answer("Сначала настройте тему через /setcasino")
         return
     
-    await message.answer("Начинаю удаление...")
+    await state.set_state(DeleteState.entering_count)
+    await message.answer(
+        "Сколько сообщений удалить?\n"
+        "Введите число (макс. 1000):"
+    )
+
+
+@dp.message(DeleteState.entering_count)
+async def delete_count_handler(message: Message, state: FSMContext):
+    if not is_super_admin(message.from_user.id):
+        await state.clear()
+        return
+    
+    try:
+        count = int(message.text.strip())
+        if count < 1 or count > 1000:
+            await message.answer("Введите число от 1 до 1000")
+            return
+    except ValueError:
+        await message.answer("Введите число")
+        return
+    
+    config = load_config()
+    chat_id = config.get("chat_id")
+    casino_thread_id = config.get("casino_thread_id")
+    
+    await message.answer(f"Удаление {count} сообщений...")
     
     deleted_count = 0
-    # Удаляем сообщения от бота в теме (последние 100)
-    # Используем Telethon для получения истории
     try:
         async for msg in client.iter_messages(
             entity=chat_id,
-            limit=200,
+            limit=count,
             reply_to=casino_thread_id
         ):
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=msg.id)
                 deleted_count += 1
-                await asyncio.sleep(0.05)
             except Exception:
                 pass
         
@@ -899,9 +888,9 @@ async def delete_all_messages(message: Message):
         
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
+    
+    await state.clear()
 
-
-# ========== УДАЛЕНИЕ СЕРВИСНЫХ СООБЩЕНИЙ ==========
 
 @dp.message(F.pinned_message)
 async def delete_pin_service_message(message: Message):
@@ -920,8 +909,6 @@ async def delete_pin_service_message(message: Message):
     except Exception:
         pass
 
-
-# ========== ДЖЕКПОТ ==========
 
 @dp.message(F.dice)
 async def slot_handler(message: Message):
@@ -1047,8 +1034,6 @@ async def regular_cell_callback(callback: CallbackQuery):
     
     await callback.answer(f"{gift['emoji']} {gift['stars']} ⭐️!")
 
-
-# ========== ЗАПУСК ==========
 
 async def start_client():
     await client.start()
