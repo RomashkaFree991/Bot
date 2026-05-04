@@ -14,8 +14,14 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 from telethon import TelegramClient
-from telethon.tl.functions.payments import GetSavedStarGiftsRequest, TransferStarGiftRequest
-from telethon.tl.types import InputSavedStarGiftUser
+from telethon.tl.functions.payments import (
+    GetSavedStarGiftsRequest, TransferStarGiftRequest,
+    GetPaymentFormRequest, SendStarsFormRequest
+)
+from telethon.tl.types import (
+    InputSavedStarGiftUser, InputInvoiceStarGift,
+    TextWithEntities, MessageEntityBold
+)
 
 # ========== КОНФИГУРАЦИЯ ==========
 
@@ -78,7 +84,10 @@ MAX_HISTORY = 3
 current_mode = MODE_NFT
 
 # Отслеживание варнов за пересылку 777
-user_warnings = {}  # user_id -> count
+user_warnings = {}
+
+# Сохранённое поле для обычного режима
+regular_fields = {}
 
 
 # ========== ПРОВЕРКА АДМИНА ==========
@@ -134,15 +143,12 @@ def is_casino_topic(message: Message, chat_id: int, casino_thread_id: int):
 
 
 def format_time_left(seconds: int) -> str:
-    """Форматирует оставшееся время в дни, часы, минуты"""
     if seconds <= 0:
         return "✅ Готов"
-    
     days = seconds // 86400
     hours = (seconds % 86400) // 3600
     minutes = (seconds % 3600) // 60
     remaining_seconds = seconds % 60
-    
     parts = []
     if days > 0:
         parts.append(f"{days}д")
@@ -152,7 +158,6 @@ def format_time_left(seconds: int) -> str:
         parts.append(f"{minutes}м")
     if remaining_seconds > 0 and days == 0 and hours == 0:
         parts.append(f"{remaining_seconds}с")
-    
     return "⏳ " + " ".join(parts) if parts else "⏳ <1м"
 
 
@@ -239,6 +244,7 @@ async def load_fluxx_gifts():
                             "name": gift_name,
                             "number": gift_number,
                             "slug": gift_slug,
+                            "catalog_id": gift_catalog_id,
                             "transfer_stars": transfer_stars,
                             "can_transfer": can_transfer,
                             "transfer_timer": transfer_timer
@@ -263,56 +269,107 @@ async def reload_fluxx_gifts():
 
 def get_random_fluxx_gift():
     global fluxx_gifts, recent_gifts_history, disabled_gifts
-    
     if not fluxx_gifts:
         return None
-    
-    available = [
-        g for g in fluxx_gifts 
-        if g["msg_id"] not in disabled_gifts and g["msg_id"] not in recent_gifts_history
-    ]
-    
+    available = [g for g in fluxx_gifts if g["msg_id"] not in disabled_gifts and g["msg_id"] not in recent_gifts_history]
     if not available:
         recent_gifts_history = []
         available = [g for g in fluxx_gifts if g["msg_id"] not in disabled_gifts]
-    
     if not available:
         return None
-    
     gift = random.choice(available)
     recent_gifts_history.append(gift["msg_id"])
     if len(recent_gifts_history) > MAX_HISTORY:
         recent_gifts_history.pop(0)
-    
     return gift
 
 
-# ========== ПЕРЕДАЧА ПОДАРКА ==========
+# ========== ОТПРАВКА ПОДАРКОВ С АККАУНТА ==========
 
-async def transfer_gift_to_user(gift_msg_id: int, to_user_id: int):
+async def send_gift_from_account(gift_id: str, to_user_id: int, message_text: str = "Поздравляем с выигрышем!"):
+    """
+    Отправляет подарок С АККАУНТА @FluxxReleyer (через Telethon).
+    Использует покупку подарка за звёзды и отправку пользователю.
+    """
+    try:
+        # Получаем получателя
+        to_entity = await client.get_entity(to_user_id)
+        
+        # Формируем сообщение
+        message = TextWithEntities(
+            text=message_text,
+            entities=[MessageEntityBold(offset=0, length=len(message_text))]
+        )
+        
+        # Создаём инвойс для покупки подарка
+        invoice = InputInvoiceStarGift(
+            peer=to_entity,
+            gift_id=int(gift_id),
+            message=message,
+            hide_name=False
+        )
+        
+        print(f"🛒 Покупка подарка {gift_id} для пользователя {to_user_id}...")
+        
+        # Получаем форму оплаты
+        payment_form = await client(GetPaymentFormRequest(invoice=invoice))
+        
+        if not payment_form:
+            print("❌ Не удалось получить форму оплаты")
+            return False, "Не удалось получить форму оплаты"
+        
+        print(f"💳 Форма оплаты получена. Стоимость: {payment_form.invoice.prices[0].amount} ⭐️")
+        
+        # Отправляем оплату (списываем звёзды и отправляем подарок)
+        payment_result = await client(SendStarsFormRequest(
+            form_id=payment_form.form_id,
+            invoice=invoice
+        ))
+        
+        print(f"✅ Подарок успешно отправлен! Результат: {payment_result}")
+        return True, ""
+    
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Ошибка отправки подарка: {error_msg}")
+        
+        # Проверяем, если не хватает звёзд
+        if "PAYMENT_REQUIRED" in error_msg:
+            print(f"💰 НЕДОСТАТОЧНО ЗВЁЗД на аккаунте {GIFT_SOURCE_USERNAME}!")
+            print(f"   Нужно пополнить баланс Stars для отправки подарков")
+            return False, "Недостаточно звёзд на аккаунте"
+        
+        if "STARGIFT_USAGE_LIMITED" in error_msg:
+            print(f"⚠️ ЛИМИТ ОТПРАВКИ ПОДАРКОВ! Подождите некоторое время.")
+            return False, "Лимит отправки подарков — подождите"
+        
+        return False, error_msg
+
+
+async def transfer_nft_gift(gift_msg_id: int, to_user_id: int):
+    """Передаёт NFT-подарок через Telethon (аккаунт @FluxxReleyer)"""
     try:
         to_entity = await client.get_entity(to_user_id)
         stargift = InputSavedStarGiftUser(msg_id=gift_msg_id)
-        result = await client(TransferStarGiftRequest(stargift=stargift, to_id=to_entity))
+        
+        result = await client(TransferStarGiftRequest(
+            stargift=stargift,
+            to_id=to_entity
+        ))
+        
+        print(f"✅ NFT-подарок успешно передан пользователю {to_user_id}")
         await reload_fluxx_gifts()
         return True, "success", 0, ""
+    
     except Exception as e:
         error_msg = str(e)
+        print(f"❌ Ошибка передачи NFT: {error_msg}")
+        
+        if "PAYMENT_REQUIRED" in error_msg:
+            print(f"💰 НЕДОСТАТОЧНО ЗВЁЗД на аккаунте {GIFT_SOURCE_USERNAME} для передачи NFT!")
+        
         err_type, seconds, time_str = parse_transfer_error(error_msg)
         return False, err_type, seconds, time_str
-
-
-async def send_regular_gift(gift_id: str, to_user_id: int):
-    """Отправляет обычный подарок (Telegram Gift) пользователю"""
-    try:
-        to_entity = await client.get_entity(to_user_id)
-        # Используем Telegram API для отправки подарка
-        # Это упрощённая версия — реальная отправка через Telethon требует специфических методов
-        # Пока возвращаем True, но в реальности нужно использовать правильный метод
-        print(f"Отправка подарка {gift_id} пользователю {to_user_id}")
-        return True, ""
-    except Exception as e:
-        return False, str(e)
 
 
 # ========== КЛАВИАТУРЫ ==========
@@ -326,10 +383,8 @@ def get_admin_main_keyboard():
 
 
 def get_modes_keyboard():
-    """Клавиатура выбора режима"""
     nft_status = "✅" if current_mode == MODE_NFT else ""
     regular_status = "✅" if current_mode == MODE_REGULAR else ""
-    
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"{nft_status} 🎨 NFT режим", callback_data="mode_nft")],
         [InlineKeyboardButton(text=f"{regular_status} 🎰 Обычный режим", callback_data="mode_regular")],
@@ -360,24 +415,23 @@ def get_gift_control_keyboard(gift_index: int, is_disabled: bool):
         ])
 
 
-def get_regular_field_keyboard():
-    """Поле 5x5 для обычного режима"""
+def get_hidden_field_keyboard(message_id: int):
+    """Скрытое поле 5x5 — кнопки без эмодзи, только ❓"""
     buttons = []
-    # Создаём поле 5x5 со случайными подарками
     field_gifts = random.choices(REGULAR_GIFTS, k=25)
+    regular_fields[message_id] = field_gifts
     
     for row in range(5):
         row_buttons = []
         for col in range(5):
             idx = row * 5 + col
-            gift = field_gifts[idx]
             row_buttons.append(InlineKeyboardButton(
-                text=f"{gift['emoji']}", 
-                callback_data=f"regular_cell_{idx}_{gift['id']}"
+                text="❓", 
+                callback_data=f"regular_cell_{message_id}_{idx}"
             ))
         buttons.append(row_buttons)
     
-    return InlineKeyboardMarkup(inline_keyboard=buttons), field_gifts
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
@@ -385,11 +439,9 @@ def get_regular_field_keyboard():
 @dp.message(F.text == "/start")
 async def start_handler(message: Message):
     user_id = message.from_user.id
-    
     if not is_admin(user_id):
         await message.answer("Привет! Это бот для розыгрыша NFT-подарков в Casino.")
         return
-    
     await message.answer(
         "👑 Админ-панель\n\nВыберите действие:",
         reply_markup=get_admin_main_keyboard()
@@ -412,10 +464,8 @@ async def admin_modes_callback(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа!", show_alert=True)
         return
-    
     global current_mode
     mode_text = "🎨 NFT" if current_mode == MODE_NFT else "🎰 Обычный"
-    
     await callback.message.edit_text(
         f"🎮 Текущий режим: <b>{mode_text}</b>\n\nВыберите режим игры:",
         reply_markup=get_modes_keyboard(),
@@ -428,20 +478,19 @@ async def mode_nft_callback(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа!", show_alert=True)
         return
-    
     global current_mode
     current_mode = MODE_NFT
-    
     await callback.answer("✅ Режим изменён на NFT!")
     
-    # Отправляем в чат казино закреплённое сообщение
     config = load_config()
     chat_id = config.get("chat_id")
+    casino_thread_id = config.get("casino_thread_id")
     
     if chat_id:
         try:
             sent = await bot.send_message(
                 chat_id=chat_id,
+                message_thread_id=casino_thread_id,
                 text="🎨 <b>Режим игры: NFT</b>\n\n"
                      "Выигрывайте уникальные NFT-подарки из коллекции @FluxxReleyer!\n"
                      "Выбейте 🎰 777 и получите реальный NFT-подарок.",
@@ -463,20 +512,19 @@ async def mode_regular_callback(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа!", show_alert=True)
         return
-    
     global current_mode
     current_mode = MODE_REGULAR
-    
     await callback.answer("✅ Режим изменён на Обычный!")
     
-    # Отправляем в чат казино закреплённое сообщение
     config = load_config()
     chat_id = config.get("chat_id")
+    casino_thread_id = config.get("casino_thread_id")
     
     if chat_id:
         try:
             sent = await bot.send_message(
                 chat_id=chat_id,
+                message_thread_id=casino_thread_id,
                 text="🎰 <b>Режим игры: Обычный</b>\n\n"
                      "Выигрывайте звёздные подарки!\n"
                      "Выбейте 🎰 777 и выберите ячейку с призом ⭐️",
@@ -511,21 +559,18 @@ async def admin_gift_list_callback(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа!", show_alert=True)
         return
-    
     if not fluxx_gifts:
         await callback.message.edit_text(
             "📦 Подарков не найдено.\nСначала обновите список.",
             reply_markup=get_admin_main_keyboard()
         )
         return
-    
     text = "📦 Список подарков @FluxxReleyer:\n\n"
     for gift in fluxx_gifts:
         status = "❌ ВЫКЛ" if gift["msg_id"] in disabled_gifts else "✅ АКТИВЕН"
         link = get_nft_link(gift["name"], gift["number"], gift.get("slug"))
         text += f"• <a href='{link}'>{escape(gift['name'])} #{gift['number']}</a>\n"
         text += f"  Статус: {status} | {gift['transfer_timer']}\n\n"
-    
     await callback.message.edit_text(
         text,
         reply_markup=get_gift_list_keyboard(),
@@ -539,18 +584,15 @@ async def gift_detail_callback(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа!", show_alert=True)
         return
-    
     try:
         index = int(callback.data.split("_")[-1])
         gift = fluxx_gifts[index]
     except (ValueError, IndexError):
         await callback.answer("Ошибка!", show_alert=True)
         return
-    
     is_disabled = gift["msg_id"] in disabled_gifts
     status = "❌ ВЫКЛЮЧЕН" if is_disabled else "✅ АКТИВЕН"
     link = get_nft_link(gift["name"], gift["number"], gift.get("slug"))
-    
     text = (
         f"🎁 <b>{escape(gift['name'])}</b> #{gift['number']}\n\n"
         f"🔗 <a href='{link}'>Ссылка на NFT</a>\n"
@@ -559,7 +601,6 @@ async def gift_detail_callback(callback: CallbackQuery):
         f"💰 Стоимость передачи: {gift['transfer_stars']}⭐️\n"
         f"🆔 msg_id: <code>{gift['msg_id']}</code>"
     )
-    
     await callback.message.edit_text(
         text,
         reply_markup=get_gift_control_keyboard(index, is_disabled),
@@ -573,14 +614,12 @@ async def disable_gift_callback(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа!", show_alert=True)
         return
-    
     try:
         index = int(callback.data.split("_")[-1])
         gift = fluxx_gifts[index]
     except (ValueError, IndexError):
         await callback.answer("Ошибка!", show_alert=True)
         return
-    
     disabled_gifts.add(gift["msg_id"])
     await callback.answer(f"Подарок {gift['name']} убран из розыгрыша!")
     await gift_detail_callback(callback)
@@ -591,14 +630,12 @@ async def enable_gift_callback(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа!", show_alert=True)
         return
-    
     try:
         index = int(callback.data.split("_")[-1])
         gift = fluxx_gifts[index]
     except (ValueError, IndexError):
         await callback.answer("Ошибка!", show_alert=True)
         return
-    
     disabled_gifts.discard(gift["msg_id"])
     await callback.answer(f"Подарок {gift['name']} возвращён в розыгрыш!")
     await gift_detail_callback(callback)
@@ -606,29 +643,34 @@ async def enable_gift_callback(callback: CallbackQuery):
 
 # ========== ЗАЩИТА ОТ ПЕРЕСЫЛКИ 777 ==========
 
-@dp.message(F.forward_from | F.forward_sender_name)
+@dp.message(F.forward_from | F.forward_sender_name | F.forward_date)
 async def forward_handler(message: Message):
     """Проверяет пересланные сообщения на наличие 777"""
     config = load_config()
     chat_id = config.get("chat_id")
     casino_thread_id = config.get("casino_thread_id")
     
-    if not chat_id or not casino_thread_id:
+    if not chat_id:
         return
     
-    if not is_casino_topic(message, chat_id, casino_thread_id):
+    # Проверяем, что это в нужном чате и теме
+    if message.chat.id != chat_id:
+        return
+    
+    if casino_thread_id and message.message_thread_id != casino_thread_id:
         return
     
     # Проверяем, содержит ли сообщение джекпот
     text = message.text or message.caption or ""
-    if "ДЖЕЕЕКПОООТ" in text or "777" in text or "🎰" in text:
+    if "ДЖЕЕЕКПОООТ" in text or "777" in text or "🎰" in text or "красава" in text:
         user_id = message.from_user.id
         
         # Удаляем сообщение
         try:
             await message.delete()
-        except Exception:
-            pass
+            print(f"🗑 Удалено пересланное сообщение от {user_id}")
+        except Exception as e:
+            print(f"❌ Не удалось удалить: {e}")
         
         # Даём варн
         user_warnings[user_id] = user_warnings.get(user_id, 0) + 1
@@ -642,13 +684,15 @@ async def forward_handler(message: Message):
                     user_id=user_id,
                     until_date=int(asyncio.get_event_loop().time()) + 3600
                 )
-                await message.answer(
-                    f"🚫 <b>{get_user_mention(message.from_user)} забанен на 1 час!</b>\n"
-                    f"Причина: 3/3 варна за пересылку джекпота.",
+                await bot.send_message(
+                    chat_id=message.chat.id,
+                    message_thread_id=casino_thread_id,
+                    text=f"🚫 <b>{get_user_mention(message.from_user)} забанен на 1 час!</b>\n"
+                         f"Причина: 3/3 варна за пересылку джекпота.",
                     parse_mode=ParseMode.HTML
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"❌ Ошибка бана: {e}")
         else:
             # Мут на 1 час
             try:
@@ -658,16 +702,18 @@ async def forward_handler(message: Message):
                     permissions=ChatPermissions(can_send_messages=False),
                     until_date=int(asyncio.get_event_loop().time()) + 3600
                 )
-                await message.answer(
-                    f"⚠️ <b>Внимание!</b> {get_user_mention(message.from_user)}\n\n"
-                    f"Пересылка выигрышного сообщения запрещена!\n"
-                    f"Выдан мут на 1 час.\n"
-                    f"Варн: {warn_count}/3\n\n"
-                    f"При 3 варнах — бан с группы.",
+                await bot.send_message(
+                    chat_id=message.chat.id,
+                    message_thread_id=casino_thread_id,
+                    text=f"⚠️ <b>Внимание!</b> {get_user_mention(message.from_user)}\n\n"
+                         f"Пересылка выигрышного сообщения запрещена!\n"
+                         f"Выдан мут на 1 час.\n"
+                         f"Варн: {warn_count}/3\n\n"
+                         f"При 3 варнах — бан с группы.",
                     parse_mode=ParseMode.HTML
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"❌ Ошибка мута: {e}")
 
 
 # ========== ОБЫЧНЫЕ КОМАНДЫ ==========
@@ -746,7 +792,7 @@ async def slot_handler(message: Message):
 
             gift_html = get_gift_html(gift["name"], gift["number"], gift.get("slug"))
 
-            success, err_type, seconds_left, time_str = await transfer_gift_to_user(gift["msg_id"], user_id)
+            success, err_type, seconds_left, time_str = await transfer_nft_gift(gift["msg_id"], user_id)
 
             if success:
                 status_text = "(уже отправлен тебе на акк)"
@@ -781,7 +827,7 @@ async def slot_handler(message: Message):
 
         else:
             # ===== ОБЫЧНЫЙ РЕЖИМ =====
-            keyboard, field_gifts = get_regular_field_keyboard()
+            keyboard = get_hidden_field_keyboard(message.message_id)
             
             text = (
                 "ДЖЕЕЕКПОООТ 🔥\n\n"
@@ -791,8 +837,6 @@ async def slot_handler(message: Message):
             
             sent = await message.reply(text, reply_markup=keyboard)
             
-            # Сохраняем поле для этого сообщения
-            # (в реальности нужно хранить в БД или памяти)
             try:
                 await bot.pin_chat_message(
                     chat_id=message.chat.id,
@@ -808,45 +852,42 @@ async def regular_cell_callback(callback: CallbackQuery):
     """Обработка выбора ячейки в обычном режиме"""
     try:
         parts = callback.data.split("_")
-        cell_idx = int(parts[2])
-        gift_id = parts[3]
+        message_id = int(parts[2])
+        cell_idx = int(parts[3])
     except (ValueError, IndexError):
         await callback.answer("Ошибка!", show_alert=True)
         return
     
-    # Находим подарок по ID
-    gift = None
-    for g in REGULAR_GIFTS:
-        if g["id"] == gift_id:
-            gift = g
-            break
-    
-    if not gift:
-        await callback.answer("Подарок не найден!", show_alert=True)
+    # Получаем сохранённое поле
+    field_gifts = regular_fields.get(message_id)
+    if not field_gifts or cell_idx >= len(field_gifts):
+        await callback.answer("Игра устарела!", show_alert=True)
         return
     
+    gift = field_gifts[cell_idx]
     user_id = callback.from_user.id
     user_mention = get_user_mention(callback.from_user)
     
-    # Отправляем подарок
-    success, error = await send_regular_gift(gift["id"], user_id)
+    # ОТПРАВЛЯЕМ ПОДАРОК С АККАУНТА @FluxxReleyer
+    success, error = await send_gift_from_account(gift["id"], user_id)
     
     if success:
         status = "✅ Уже отправлен!"
     else:
-        status = f"❌ Ошибка: {error[:50]}"
-    
-    # Обновляем сообщение
+        status = f"❌ {error}"
+
+    # Вскрываем ячейку — показываем, что было под кнопкой
     await callback.message.edit_text(
         f"ДЖЕЕЕКПОООТ 🔥\n\n"
         f"{user_mention} красава, ты выиграл! 🏆\n\n"
-        f"🎁 Подарок: {gift['emoji']} <b>{gift['stars']} ⭐️</b>\n"
+        f"🎁 Ты выбрал ячейку #{cell_idx + 1}\n"
+        f"🎉 Подарок: {gift['emoji']} <b>{gift['stars']} ⭐️</b>\n"
         f"{status}\n\n"
         f"Играй ещё и выигрывай призы!",
         parse_mode=ParseMode.HTML
     )
     
-    await callback.answer(f"Вы выбрали подарок на {gift['stars']} ⭐️!")
+    await callback.answer(f"🎉 {gift['emoji']} {gift['stars']} ⭐️!")
 
 
 # ========== ЗАПУСК ==========
